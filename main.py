@@ -1,62 +1,110 @@
 import os
-import json
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
+from twilio.rest import Client
 
 app = Flask(__name__)
-client = genai.Client()
 
-# Global database held in memory to store active commands for devices
-DEVICE_CHANNELS = {
+# Initialize Google GenAI and Twilio Clients using environment variables
+# (You will paste these credentials securely inside your Render Settings dashboard)
+gemini_client = genai.Client()
+twilio_client = Client(
+    os.environ.get("TWILIO_ACCOUNT_SID"), 
+    os.environ.get("TWILIO_AUTH_TOKEN")
+)
+
+EMERGENCY_PHONE = os.environ.get("FAMILY_PHONE_NUMBER", "+919999999999")
+TWILIO_PHONE = os.environ.get("TWILIO_PHONE_NUMBER")
+
+# Global variables acting as our cloud memory switchboard
+device_channels = {
     "laptop": {"action": "NONE", "payload": ""},
-    "tv": {"action": "NONE", "payload": ""},
-    "phone": {"action": "NONE", "payload": ""}
+    "mobile": {"action": "NONE", "payload": ""}
 }
+medication_logs = []
+
+# System instructions to feed Gemini context, location, Hindi support, and structured output
+SYSTEM_INSTRUCTION = """
+You are the AI brain for 'SAHAYAK', a single-button universal assistive remote for an elderly user.
+The user is located in Bhopal, Madhya Pradesh, India.
+You accept voice inputs in English, pure Hindi, or mixed 'Hinglish' (e.g., 'laptop par youtube kholo').
+
+Analyze the user's intent. You MUST respond ONLY in a rigid JSON format containing three fields:
+1. "target": Where to send the action ("laptop", "mobile", "none", or "emergency")
+2. "action": The programmatic command ("OPEN_URL", "ZOOM_IN", "SPOKEN_RESPONSE", "SOS_TRIGGER")
+3. "payload": The specific text, link, or spoken answer.
+
+Examples:
+- "Youtube kholo" -> {"target": "laptop", "action": "OPEN_URL", "payload": "https://youtube.com"}
+- "Text bada karo" -> {"target": "laptop", "action": "ZOOM_IN", "payload": ""}
+- "Bhopal ka Mausam kaisa hai?" -> {"target": "none", "action": "SPOKEN_RESPONSE", "payload": "Bhopal mein aaj mausam saaf hai."}
+- "Bachao! Mujhe madad chahiye" -> {"target": "emergency", "action": "SOS_TRIGGER", "payload": "User screamed for help"}
+"""
 
 @app.route("/process_voice", methods=["POST"])
 def process_voice():
-    data = request.get_json()
-    user_voice_text = data.get("command", "")
+    data = request.json or {}
+    user_speech = data.get("text", "")
     
-    system_instruction = (
-        "You are the central brain for an elderly care AI remote. "
-        "Determine if the user is asking a question or controlling a device (tv, laptop, phone). "
-        "For questions, answer them warmly and clearly. For controls, identify the target and app link. "
-        "Respond ONLY with this JSON schema:\n"
-        "{\n"
-        '  "type": "control" | "question",\n'
-        '  "target_device": "laptop" | "tv" | "phone" | "none",\n'
-        '  "action": "OPEN_URL" | "SPEAK_ANSWER",\n'
-        '  "payload": "the website link (e.g. https://youtube.com) OR the verbal answer text"\n'
-        "}"
-    )
+    if not user_speech:
+        return jsonify({"status": "error", "message": "No input speech provided"}), 400
 
     try:
-        response = client.models.generate_content(
+        # Pass speech to Gemini along with our strict structure constraints
+        response = gemini_client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[user_voice_text],
-            config=types.GenerateContentConfig(system_instruction=system_instruction, response_mime_type="application/json")
+            contents=user_speech,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                response_mime_type="application/json"
+            )
         )
         
-        result = json.loads(response.text)
-        
-        # If it's a device command, route it to that specific device's channel
-        target = result.get("target_device")
-        if target in DEVICE_CHANNELS:
-            DEVICE_CHANNELS[target] = {"action": result["action"], "payload": result["payload"]}
-            
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"type": "question", "action": "SPEAK_ANSWER", "payload": "Please try again."}), 500
+        # Parse the JSON layout returned by Gemini
+        ai_decision = response.json()
+        target = ai_decision.get("target")
+        action = ai_decision.get("action")
+        payload = ai_decision.get("payload")
 
+        # FEATURE A: EMERGENCY SOS TRIGGER
+        if target == "emergency" or action == "SOS_TRIGGER":
+            if TWILIO_PHONE:
+                twilio_client.messages.create(
+                    body="🚨 EMERGENCY ALERT: Grandfather pressed the SAHAYAK button and called for help!",
+                    from_=TWILIO_PHONE,
+                    to=EMERGENCY_PHONE
+                )
+            return jsonify({"action": "SPOKEN_RESPONSE", "payload": "Emergency alert sent to family."})
+
+        # FEATURE B: ROUTING ACCESSIBILITY & URL ACTIONS TO THE LAPTOP
+        if target in device_channels:
+            device_channels[target] = {"action": action, "payload": payload}
+            return jsonify({"action": "CONFIRMATION", "payload": f"Command sent to {target}"})
+
+        # FEATURE C: RETURNING SPOKEN TEXT BACK TO THE HANDHELD SPEAKER
+        if action == "SPOKEN_RESPONSE":
+            return jsonify({"action": "SPOKEN_RESPONSE", "payload": payload})
+
+        return jsonify(ai_decision)
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Endpoint for Laptop/Mobile background agents to poll for pending commands
 @app.route("/get_commands/<device_id>", methods=["GET"])
 def get_commands(device_id):
-    # Devices constantly check this endpoint to see if they have work to do
-    command = DEVICE_CHANNELS.get(device_id, {"action": "NONE", "payload": ""})
-    # Reset channel after reading so it doesn't loop infinitely
-    DEVICE_CHANNELS[device_id] = {"action": "NONE", "payload": ""}
-    return jsonify(command)
+    if device_id in device_channels:
+        # Fetch the pending action, then clear it so it doesn't loop infinitely
+        current_command = device_channels[device_id]
+        device_channels[device_id] = {"action": "NONE", "payload": ""}
+        return jsonify(current_command)
+    return jsonify({"action": "NONE", "payload": ""}), 404
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+# FEATURE D: MEDICATION TRACKING ROUTE
+@app.route("/log_medicine", methods=["POST"])
+def log_medicine():
+    data = request.json or {}
+    status = data.get("status", "taken")
+    medication_logs.append(status)
+    return jsonify({"status": "success", "total_logs": len(medication_logs)})
