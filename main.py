@@ -2,20 +2,11 @@ import os
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
-from twilio.rest import Client
 
 app = Flask(__name__)
 
-# Initialize Google GenAI and Twilio Clients using environment variables
-# (You will paste these credentials securely inside your Render Settings dashboard)
+# Initialize Google GenAI Client using environment variable
 gemini_client = genai.Client()
-twilio_client = Client(
-    os.environ.get("TWILIO_ACCOUNT_SID"), 
-    os.environ.get("TWILIO_AUTH_TOKEN")
-)
-
-EMERGENCY_PHONE = os.environ.get("FAMILY_PHONE_NUMBER", "+919999999999")
-TWILIO_PHONE = os.environ.get("TWILIO_PHONE_NUMBER")
 
 # Global variables acting as our cloud memory switchboard
 device_channels = {
@@ -31,15 +22,14 @@ The user is located in Bhopal, Madhya Pradesh, India.
 You accept voice inputs in English, pure Hindi, or mixed 'Hinglish' (e.g., 'laptop par youtube kholo').
 
 Analyze the user's intent. You MUST respond ONLY in a rigid JSON format containing three fields:
-1. "target": Where to send the action ("laptop", "mobile", "none", or "emergency")
-2. "action": The programmatic command ("OPEN_URL", "ZOOM_IN", "SPOKEN_RESPONSE", "SOS_TRIGGER")
+1. "target": Where to send the action ("laptop", "mobile", or "none")
+2. "action": The programmatic command ("OPEN_URL", "ZOOM_IN", "SPOKEN_RESPONSE")
 3. "payload": The specific text, link, or spoken answer.
 
 Examples:
 - "Youtube kholo" -> {"target": "laptop", "action": "OPEN_URL", "payload": "https://youtube.com"}
 - "Text bada karo" -> {"target": "laptop", "action": "ZOOM_IN", "payload": ""}
 - "Bhopal ka Mausam kaisa hai?" -> {"target": "none", "action": "SPOKEN_RESPONSE", "payload": "Bhopal mein aaj mausam saaf hai."}
-- "Bachao! Mujhe madad chahiye" -> {"target": "emergency", "action": "SOS_TRIGGER", "payload": "User screamed for help"}
 """
 
 @app.route("/process_voice", methods=["POST"])
@@ -67,22 +57,12 @@ def process_voice():
         action = ai_decision.get("action")
         payload = ai_decision.get("payload")
 
-        # FEATURE A: EMERGENCY SOS TRIGGER
-        if target == "emergency" or action == "SOS_TRIGGER":
-            if TWILIO_PHONE:
-                twilio_client.messages.create(
-                    body="🚨 EMERGENCY ALERT: Grandfather pressed the SAHAYAK button and called for help!",
-                    from_=TWILIO_PHONE,
-                    to=EMERGENCY_PHONE
-                )
-            return jsonify({"action": "SPOKEN_RESPONSE", "payload": "Emergency alert sent to family."})
-
-        # FEATURE B: ROUTING ACCESSIBILITY & URL ACTIONS TO THE LAPTOP
+        # FEATURE A: ROUTING ACCESSIBILITY & URL ACTIONS TO THE LAPTOP
         if target in device_channels:
             device_channels[target] = {"action": action, "payload": payload}
             return jsonify({"action": "CONFIRMATION", "payload": f"Command sent to {target}"})
 
-        # FEATURE C: RETURNING SPOKEN TEXT BACK TO THE HANDHELD SPEAKER
+        # FEATURE B: RETURNING SPOKEN TEXT BACK TO THE HANDHELD SPEAKER
         if action == "SPOKEN_RESPONSE":
             return jsonify({"action": "SPOKEN_RESPONSE", "payload": payload})
 
@@ -101,10 +81,11 @@ def get_commands(device_id):
         return jsonify(current_command)
     return jsonify({"action": "NONE", "payload": ""}), 404
 
-# FEATURE D: MEDICATION TRACKING ROUTE
+# FEATURE C: MEDICATION TRACKING ROUTE
 @app.route("/log_medicine", methods=["POST"])
 def log_medicine():
     data = request.json or {}
     status = data.get("status", "taken")
     medication_logs.append(status)
     return jsonify({"status": "success", "total_logs": len(medication_logs)})
+    
