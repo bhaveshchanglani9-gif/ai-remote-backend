@@ -89,4 +89,6 @@ def log_medicine():
     status = data.get("status", "taken")
     medication_logs.append(status)
     return jsonify({"status": "success", "total_logs": len(medication_logs)})
-    
+    @app.route("/get_medicine_logs", methods=["GET"])
+def get_medicine_logs():
+    return jsonify({"logs": medication_logs})
