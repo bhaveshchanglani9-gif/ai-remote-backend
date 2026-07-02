@@ -2,7 +2,8 @@ import os
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
-
+from flask_cors import CORS
+CORS(app)
 app = Flask(__name__)
 
 # Initialize Google GenAI Client using environment variable
